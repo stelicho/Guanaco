@@ -107,9 +107,9 @@ type checker in v1. It borrows OCaml's expression forms (`let`, `match`,
 ADTs, pipe-friendly function application) because they're the right tool
 for describing shapes, without pulling in a compiler toolchain.
 
-## Project layout (planned)
+## Project layout
 
-Only `main.c` exists today. The intended module breakdown:
+Every module in the original plan now exists:
 
 ```
 main.c        CLI entry point: parse args, run the pipeline, write output
@@ -117,7 +117,7 @@ lexer.c/.h    Source text -> token stream
 ast.c/.h      AST node definitions (expressions, type decls, patterns)
 parser.c/.h   Recursive-descent parser: tokens -> AST
 value.c/.h    Runtime value representation (tagged union: int, float,
-              closure, constructor + args, cons list, record)
+              closure, constructor + args, cons list, record, builtin)
 env.c/.h      Lexical environments for closures (persistent linked scopes)
 eval.c/.h     Tree-walking evaluator: AST + Env -> Value
 motion.c/.h   Registers the built-in `point`/`move` ADT and domain
@@ -128,22 +128,111 @@ gcode.c/.h    Motion IR -> G-code/M-code/T-code text emission
 Memory strategy for v1: a bump/arena allocator freed at process exit.
 Guanaco is a short-lived CLI process (parse file, evaluate, emit, exit), so
 a real GC or refcounting scheme isn't justified yet — revisit if Guanaco
-grows into a long-running or interactive tool.
+grows into a long-running or interactive tool. Currently this is just
+plain `malloc` with no corresponding frees for `Env`/`Value` data (the AST
+itself is freed via `program_free`); a real arena can replace the raw
+`malloc` calls without changing any call sites once introduced.
 
 ## Status
 
-Early design stage. Next steps:
+Early design stage.
 
-1. Define the AST and token set; get a minimal lexer/parser round-tripping
-   `let`, arithmetic, and function application.
-2. Add the tagged `Value` representation and a tree-walking evaluator for
-   that subset.
-3. Introduce `type`/ADT declarations and `match`.
-4. Seed the `point`/`move` vocabulary and write the G-code emitter.
-5. Wire it all into `main.c` as `guanaco input.gua -o output.gcode`.
+Done:
+
+- Lexer (`lexer.c/.h`): full token set, nested `(* ... *)` comments,
+  lowercase/uppercase identifier distinction.
+- AST + recursive-descent parser (`ast.c/.h`, `parser.c/.h`), with real
+  OCaml operator precedence throughout (application/`.field` tightest,
+  then unary `-`, `* /`, `+ -`, `::` (right-assoc), `@` (right-assoc),
+  comparisons, `&&`, `||`, bare-comma tuples loosest):
+  - `let` / `let rec` bindings (top-level decls and `let ... in`
+    expressions), `if`/`then`/`else`, `fun`, function application by
+    juxtaposition.
+  - `type` declarations for both record shapes (`{ x : float; ... }`)
+    and variants (`A of t | B of t1 * t2 | C`), including the postfix
+    `t list` type-expression form. These are parsed but **not consulted
+    by the evaluator** — Guanaco has no type checker in v1, so record
+    literals and constructor applications are self-describing at their
+    use site instead.
+  - Tuples (`a, b`), list literals (`[a; b; c]`, desugared to nested
+    `::`/`[]` in the parser), records (`{ x = 1.0; y = 2.0 }`), field
+    access (`p.x`), and constructor application (`Circle 2.0`,
+    `Rectangle (3.0, 4.0)` — constructors take zero or one argument,
+    multi-field constructors bundle their args as a tuple, same as
+    OCaml).
+  - `match` with patterns: wildcard `_`, variables, int/float/bool/string
+    literals, `[]`/`::`, tuples, and constructors (nullary or with one
+    nested pattern). Record patterns and or-patterns aren't supported.
+  - Parse errors are reported with line/col and the parser resynchronizes
+    at the next top-level `let`/`type` so later decls still get parsed.
+- `Value` representation, `Env` (persistent linked scopes), and a
+  tree-walking evaluator (`value.c/.h`, `env.c/.h`, `eval.c/.h`) covering
+  all of the above: int/float/bool/string/list/tuple/record/constructor
+  values, arithmetic (int and float variants kept distinct, matching
+  OCaml), structural `=`/`<>` (recursing into lists/tuples/records/
+  constructors), ordering `<`/`<=`/`>`/`>=` (int/float/string only —
+  ordering compound values isn't needed by anything in the current
+  subset), `&&`/`||` with proper short-circuiting, `if`, closures with
+  currying, `let rec` recursion (tied via a self-referencing `Env`,
+  rejected at eval time if the binding has no parameters), and pattern
+  matching. Runtime errors (unbound variable, type mismatch, calling a
+  non-function, applying an already-saturated constructor, a field that
+  doesn't exist, an unmatched `match`, division by zero, ...) print a
+  `line:col` diagnostic and `exit(1)`, matching the parser's fatal-error
+  style.
+
+- `motion.c/.h`: numeric builtins `sin`/`cos`/`sqrt`/`float_of_int`/
+  `int_of_float`, seeded into every program's global environment by
+  `eval_program`. A native-function `Value` kind (`VAL_BUILTIN`) backs
+  these — unlike user closures, they call straight into C instead of
+  evaluating an `Expr` body. `kMotionPreludeSource` documents the
+  `point`/`move` shape (see the vocabulary block above) for reference —
+  it isn't parsed or type-checked automatically, since (as with
+  user-defined types) constructors like `Rapid`/`Linear` need no
+  registration at all: any `UIDENT` already works as a constructor tag
+  the moment it's applied.
+- `gcode.c/.h`: walks a Motion IR value (a single move, a bare list of
+  moves, or an explicit `Sequence`) and emits `G0`/`G1`/`G2`/`G3`/`G4`/
+  `T.. M6`/`M3 S..` lines. Tracks the running tool position across the
+  whole walk so `ArcCW`/`ArcCCW` can emit GRBL-style relative `I`/`J`
+  center offsets. A point's `z` field defaults to `0.0` when absent
+  (matching the vocabulary block's own `square`/`ring` example, which
+  only ever sets `x`/`y`); `x`/`y` are required. On a malformed Motion IR
+  value, prints a diagnostic to stderr and returns failure rather than
+  crashing.
+- The real CLI: `guanaco input.gua -o output.gcode` parses and evaluates
+  the file, then emits `main`'s value as G-code to the given path.
+  `guanaco input.gua` (no `-o`) keeps the older token/AST/eval debug dump
+  and now also prints a G-code preview of `main`'s value when it's
+  Motion-IR-shaped. `guanaco` with no arguments runs two built-in demos
+  through the full pipeline, including this README's own ring/square
+  example (with one adjustment — see `main.c`'s comment on `kRingSample`:
+  its `Linear` now carries a feedrate to match `Linear of point * float`,
+  since the intro snippet above omits one for brevity).
+
+Not yet planned in detail: `let`-pattern destructuring, record patterns,
+record-update syntax (`{ r with x = 1 }`), modules, exceptions, and
+`List.map`/`List.iter`/qualified `Module.name` access (mentioned in
+"Language" above but not yet supported by the lexer/parser).
 
 ## Building
 
-Currently a single-file Xcode C target (`main.c`). No external
-dependencies are required — everything (lexer, parser, evaluator, code
-generator) will be plain C in this repository.
+A single-file-per-module Xcode C target: `main.c`, `lexer.c/.h`,
+`ast.c/.h`, `parser.c/.h`, `value.c/.h`, `env.c/.h`, `eval.c/.h`,
+`motion.c/.h`, `gcode.c/.h`. No external dependencies beyond the C
+standard library (`gcode.c`/`motion.c` pull in `<math.h>` for the
+trig/sqrt builtins) — everything is plain C in this repository.
+
+```
+guanaco                          run the built-in demos (see below)
+guanaco input.gua                tokenize + parse + eval + print debug info
+guanaco input.gua -o output.gcode   the real pipeline: write G-code to a file
+```
+
+With no arguments, `main.c` runs two built-in samples through the full
+tokenize/parse/eval/G-code pipeline: this README's own ring/square
+example (now runnable end to end — `main` evaluates to a 3-element list
+of `Linear` moves, which then emit as real `G1` lines), and a second
+sample exercising variants, records, field access, and list-pattern
+recursion (whose `main` is a plain tuple, so the G-code step reports —
+correctly — that it isn't Motion IR).
