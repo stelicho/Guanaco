@@ -268,6 +268,29 @@ Done:
 
 Not yet planned in detail: modules.
 
+## Versioning
+
+Guanaco follows [Semantic Versioning](https://semver.org/)
+(`MAJOR.MINOR.PATCH`), starting at `0.1.0`. While the major version is
+`0` (i.e. for the whole "early design stage" described above):
+
+- `MINOR` bumps cover anything that adds or changes language/CLI
+  behavior — new syntax, new builtins, new evaluator semantics, new
+  diagnostics — the same things a `MAJOR` bump would cover once there's
+  a `1.0`, since nothing is guaranteed stable yet.
+- `PATCH` bumps are pure bug fixes or internal refactors with no
+  observable change to how a `.gua` program parses, evaluates, or
+  emits G-code.
+- `1.0.0` is reserved for when the v1 language subset (see "Status"
+  above) is stable enough to commit to not silently breaking existing
+  `.gua` programs between releases. Realistically that's once modules
+  are settled (implemented or deliberately descoped) and the pipeline
+  has been exercised generating G-code for real hardware, not just the
+  built-in demos.
+
+Releases are tagged `vMAJOR.MINOR.PATCH` on `main` and published as
+GitHub Releases with a short summary of what changed.
+
 ## Building
 
 A single-file-per-module Xcode C target: `main.c`, `lexer.c/.h`,
