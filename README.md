@@ -1,5 +1,7 @@
 # Guanaco
 
+[![Makefile CI](https://github.com/stelicho/Guanaco/actions/workflows/makefile.yml/badge.svg)](https://github.com/stelicho/Guanaco/actions/workflows/makefile.yml)
+
 Guanaco is a host-side compiler/generator for CNC and 3D-printer toolpaths.
 Instead of writing G-code as an imperative list of coordinates, you describe
 tool motion as **functional expressions and algebraic data types**, in an
@@ -293,11 +295,21 @@ GitHub Releases with a short summary of what changed.
 
 ## Building
 
-A single-file-per-module Xcode C target: `main.c`, `lexer.c/.h`,
-`ast.c/.h`, `parser.c/.h`, `value.c/.h`, `env.c/.h`, `eval.c/.h`,
-`motion.c/.h`, `gcode.c/.h`. No external dependencies beyond the C
-standard library (`gcode.c`/`motion.c` pull in `<math.h>` for the
-trig/sqrt builtins) — everything is plain C in this repository.
+Every module is a single plain-C file/header pair: `main.c`,
+`lexer.c/.h`, `ast.c/.h`, `parser.c/.h`, `value.c/.h`, `env.c/.h`,
+`eval.c/.h`, `motion.c/.h`, `gcode.c/.h`. No external dependencies
+beyond the C standard library (`gcode.c`/`motion.c` pull in `<math.h>`
+for the trig/sqrt builtins) — everything builds with a plain C11
+compiler, via the `Makefile` in this repository:
+
+```
+make            build the `guanaco` binary
+make test       build, then run the built-in demos as a smoke test
+make clean      remove the binary and object files
+```
+
+Every push and pull request against `main` runs `make` and `make test`
+via GitHub Actions (see `.github/workflows/makefile.yml`).
 
 ```
 guanaco                          run the built-in demos (see below)
