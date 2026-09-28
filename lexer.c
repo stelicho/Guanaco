@@ -22,6 +22,8 @@ static const Keyword kKeywords[] = {
     { "of",    TOK_OF },
     { "match", TOK_MATCH },
     { "with",  TOK_WITH },
+    { "try",   TOK_TRY },
+    { "exception", TOK_EXCEPTION },
     { "fun",   TOK_FUN },
     { "if",    TOK_IF },
     { "then",  TOK_THEN },
@@ -304,6 +306,8 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_OF: return "OF";
         case TOK_MATCH: return "MATCH";
         case TOK_WITH: return "WITH";
+        case TOK_TRY: return "TRY";
+        case TOK_EXCEPTION: return "EXCEPTION";
         case TOK_FUN: return "FUN";
         case TOK_IF: return "IF";
         case TOK_THEN: return "THEN";

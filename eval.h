@@ -7,12 +7,16 @@
 //  Covers the current parser subset: let / let rec, if/then/else, fun,
 //  application (curried), arithmetic (+ - * / on ints, +. -. *. /. on
 //  floats), comparisons (=, <>, <, <=, >, >= on matching int/float/string,
-//  plus =/<> on bool), and &&/|| with short-circuit evaluation.
+//  plus =/<> on bool), &&/|| with short-circuit evaluation, and
+//  raise/try/with exceptions (see guanaco_raise's comment for how these
+//  are implemented on top of setjmp/longjmp).
 //
 //  Runtime errors (unbound variable, type mismatch, calling a
 //  non-function, division by zero, non-function 'let rec') print a
 //  diagnostic to stderr and exit(1) -- Guanaco is a short-lived CLI
 //  process, so there is no caller to hand a recoverable error to yet.
+//  An exception raised with nothing to catch it is fatal in the same
+//  way, printing "uncaught exception: ..." instead.
 //
 
 #ifndef GUANACO_EVAL_H

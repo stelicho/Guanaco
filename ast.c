@@ -154,6 +154,14 @@ Expr *expr_new_match(Expr *scrutinee, MatchArm *arms, int arm_count, int line, i
     return e;
 }
 
+Expr *expr_new_try(Expr *body, MatchArm *arms, int arm_count, int line, int col) {
+    Expr *e = alloc_expr(EXPR_TRY, line, col);
+    e->data.as_try.body = body;
+    e->data.as_try.arms = arms;
+    e->data.as_try.arm_count = arm_count;
+    return e;
+}
+
 static Pattern *alloc_pattern(PatternKind kind, int line, int col) {
     Pattern *p = malloc(sizeof(Pattern));
     p->kind = kind;
@@ -402,6 +410,14 @@ void expr_free(Expr *expr) {
             }
             free(expr->data.as_match.arms);
             break;
+        case EXPR_TRY:
+            expr_free(expr->data.as_try.body);
+            for (int i = 0; i < expr->data.as_try.arm_count; i++) {
+                pattern_free(expr->data.as_try.arms[i].pattern);
+                expr_free(expr->data.as_try.arms[i].body);
+            }
+            free(expr->data.as_try.arms);
+            break;
     }
     free(expr);
 }
@@ -438,6 +454,14 @@ void program_free(Program *program) {
     free(program->types);
     program->types = NULL;
     program->type_count = 0;
+
+    for (int i = 0; i < program->exception_count; i++) {
+        free(program->exceptions[i].name);
+        type_expr_free(program->exceptions[i].arg_type);
+    }
+    free(program->exceptions);
+    program->exceptions = NULL;
+    program->exception_count = 0;
 }
 
 const char *unary_op_name(UnaryOp op) {
@@ -646,6 +670,16 @@ void ast_print_expr(const Expr *expr, int indent) {
                 ast_print_expr(expr->data.as_match.arms[i].body, indent + 2);
             }
             break;
+        case EXPR_TRY:
+            printf("Try\n");
+            ast_print_expr(expr->data.as_try.body, indent + 1);
+            for (int i = 0; i < expr->data.as_try.arm_count; i++) {
+                print_indent(indent + 1);
+                printf("Arm\n");
+                print_pattern(expr->data.as_try.arms[i].pattern, indent + 2);
+                ast_print_expr(expr->data.as_try.arms[i].body, indent + 2);
+            }
+            break;
     }
 }
 
@@ -694,9 +728,21 @@ static void print_type_decl(const TypeDecl *decl) {
     }
 }
 
+static void print_exception_decl(const ExceptionDecl *decl) {
+    printf("Exception %s", decl->name);
+    if (decl->arg_type) {
+        printf(" of ");
+        print_type_expr(decl->arg_type);
+    }
+    printf("\n");
+}
+
 void ast_print_program(const Program *program) {
     for (int i = 0; i < program->type_count; i++) {
         print_type_decl(&program->types[i]);
+    }
+    for (int i = 0; i < program->exception_count; i++) {
+        print_exception_decl(&program->exceptions[i]);
     }
     for (int i = 0; i < program->count; i++) {
         Decl *d = &program->decls[i];

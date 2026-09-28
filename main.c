@@ -148,7 +148,7 @@ static void run_pipeline(const char *source) {
     Value main_value;
     if (eval_main(&program, &main_value)) {
         printf("main = ");
-        value_print(&main_value);
+        value_print(&main_value, stdout);
         printf("\n");
 
         printf("\n--- G-code preview ---\n\n");

@@ -233,11 +233,11 @@ static Expr *parse_fun(Parser *p) {
     return expr_new_fun(params, param_count, body, line, col);
 }
 
-static Expr *parse_match(Parser *p) {
-    int line = p->current.line, col = p->current.col;
-    consume(p, TOK_MATCH, "expected 'match'");
-    Expr *scrutinee = parse_expr(p);
-    consume(p, TOK_WITH, "expected 'with' after match scrutinee");
+/* Parses the `[|] pattern -> expr (| pattern -> expr)*` arm list shared
+   by `match ... with` and `try ... with`. The leading '|' before the
+   scrutinee/body has already been consumed by the caller via TOK_WITH;
+   an optional '|' before the very first arm is consumed here. */
+static MatchArm *parse_match_arms(Parser *p, int *out_count) {
     match(p, TOK_PIPE); /* optional leading '|' before the first arm */
 
     int capacity = 4, count = 0;
@@ -255,7 +255,31 @@ static Expr *parse_match(Parser *p) {
         count++;
         if (!match(p, TOK_PIPE)) break;
     }
+    *out_count = count;
+    return arms;
+}
+
+static Expr *parse_match(Parser *p) {
+    int line = p->current.line, col = p->current.col;
+    consume(p, TOK_MATCH, "expected 'match'");
+    Expr *scrutinee = parse_expr(p);
+    consume(p, TOK_WITH, "expected 'with' after match scrutinee");
+    int count;
+    MatchArm *arms = parse_match_arms(p, &count);
     return expr_new_match(scrutinee, arms, count, line, col);
+}
+
+/* `try body with pattern -> expr | ...`: evaluates body, and if raising
+   an exception unwinds into this try, matches the raised value against
+   each arm in order (exactly like `match`) -- see eval.c's EXPR_TRY. */
+static Expr *parse_try(Parser *p) {
+    int line = p->current.line, col = p->current.col;
+    consume(p, TOK_TRY, "expected 'try'");
+    Expr *body = parse_expr(p);
+    consume(p, TOK_WITH, "expected 'with' after try body");
+    int count;
+    MatchArm *arms = parse_match_arms(p, &count);
+    return expr_new_try(body, arms, count, line, col);
 }
 
 /* { field = expr; field = expr; ... } or { base with field = expr; ... }
@@ -641,6 +665,7 @@ static Expr *parse_expr(Parser *p) {
     if (check(p, TOK_IF)) return parse_if(p);
     if (check(p, TOK_FUN)) return parse_fun(p);
     if (check(p, TOK_MATCH)) return parse_match(p);
+    if (check(p, TOK_TRY)) return parse_try(p);
     return parse_tuple(p);
 }
 
@@ -946,6 +971,36 @@ static TypeDecl parse_type_decl(Parser *p) {
     return decl;
 }
 
+/* `exception Name [of type]` -- parsed the same way as a single
+   variant case (see parse_type_decl's TYPEDEF_VARIANT branch), just as
+   its own top-level form. Not consulted by the evaluator; see
+   ExceptionDecl's comment in ast.h for why raise/try don't need it. */
+static ExceptionDecl parse_exception_decl(Parser *p) {
+    int line = p->current.line, col = p->current.col;
+    consume(p, TOK_EXCEPTION, "expected 'exception'");
+
+    char *name;
+    if (check(p, TOK_UIDENT)) {
+        name = dup_lexeme(p->current.lexeme, p->current.length);
+        advance(p);
+    } else {
+        error_at(p, &p->current, "expected a constructor name after 'exception'");
+        name = dup_lexeme("_error_", 7);
+    }
+
+    TypeExpr *arg_type = NULL;
+    if (match(p, TOK_OF)) {
+        arg_type = parse_type_expr(p);
+    }
+
+    ExceptionDecl decl;
+    decl.name = name;
+    decl.arg_type = arg_type;
+    decl.line = line;
+    decl.col = col;
+    return decl;
+}
+
 /* ==================== Top-level declarations ==================== */
 
 static Decl parse_decl(Parser *p) {
@@ -983,7 +1038,7 @@ static Decl parse_decl(Parser *p) {
    top-level declaration so later decls still get parsed and reported. */
 static void synchronize(Parser *p) {
     p->panic_mode = 0;
-    while (!check(p, TOK_EOF) && !check(p, TOK_LET) && !check(p, TOK_TYPE)) {
+    while (!check(p, TOK_EOF) && !check(p, TOK_LET) && !check(p, TOK_TYPE) && !check(p, TOK_EXCEPTION)) {
         advance(p);
     }
 }
@@ -994,6 +1049,9 @@ Program parser_parse_program(Parser *p) {
 
     int type_capacity = 4, type_count = 0;
     TypeDecl *types = malloc(sizeof(TypeDecl) * (size_t)type_capacity);
+
+    int exception_capacity = 4, exception_count = 0;
+    ExceptionDecl *exceptions = malloc(sizeof(ExceptionDecl) * (size_t)exception_capacity);
 
     while (!check(p, TOK_EOF)) {
         if (check(p, TOK_TYPE)) {
@@ -1011,8 +1069,24 @@ Program parser_parse_program(Parser *p) {
             continue;
         }
 
+        if (check(p, TOK_EXCEPTION)) {
+            ExceptionDecl e = parse_exception_decl(p);
+            if (p->panic_mode) {
+                free(e.name);
+                type_expr_free(e.arg_type);
+                synchronize(p);
+                continue;
+            }
+            if (exception_count == exception_capacity) {
+                exception_capacity *= 2;
+                exceptions = realloc(exceptions, sizeof(ExceptionDecl) * (size_t)exception_capacity);
+            }
+            exceptions[exception_count++] = e;
+            continue;
+        }
+
         if (!check(p, TOK_LET)) {
-            error_at(p, &p->current, "expected a top-level 'let' or 'type' declaration");
+            error_at(p, &p->current, "expected a top-level 'let', 'type', or 'exception' declaration");
             synchronize(p);
             continue;
         }
@@ -1039,5 +1113,7 @@ Program parser_parse_program(Parser *p) {
     program.count = decl_count;
     program.types = types;
     program.type_count = type_count;
+    program.exceptions = exceptions;
+    program.exception_count = exception_count;
     return program;
 }

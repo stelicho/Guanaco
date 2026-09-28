@@ -80,6 +80,9 @@ anywhere near the machine.
   motion constructors)
 - Records (including functional update and destructuring patterns),
   tuples, lists (`::`, `@`, `List.map`, `List.iter`, ...)
+- `exception` declarations, `raise`, and `try ... with` for the
+  occasional invalid-input path (e.g. a degenerate radius or a division
+  by zero in path math) that's better handled than left to crash
 - Numeric primitives (`+.`, `-.`, `*.`, `/.`, `sin`, `cos`, `sqrt`, ...) so
   paths like helices, involute gears, or spirals can be computed rather
   than hand-plotted
@@ -245,8 +248,25 @@ Done:
   evaluation across every element of a list (e.g. so `fn` can raise a
   runtime error on an invalid one), since Guanaco has neither mutation
   nor I/O builtins for it to produce a visible side effect with yet.
+- `exception Name [of type]` declarations (parsed like a single variant
+  case, and — like `type` — not consulted by the evaluator: any
+  `UIDENT` already works as an exception tag the moment it's raised,
+  no declaration required), `raise exn` (an ordinary global-env
+  builtin, since `raise expr` is just unary application like `sin x`),
+  and `try body with pattern -> expr | ...` (reusing `match`'s arm
+  grammar and `match_pattern`). Implemented on top of `setjmp`/
+  `longjmp`: `EXPR_TRY` pushes a handler (an intrusive linked list of
+  the *local* `jmp_buf`s living in each currently-active `try`'s stack
+  frame) before evaluating its body, so `raise` deep inside an
+  arbitrary call chain can unwind straight back to the nearest
+  enclosing `try` regardless of how many C frames are in between —
+  there's no separate call-stack data structure of its own for a
+  tree-walking interpreter to unwind more directly. An exception
+  raised with no enclosing `try` is fatal, same as a runtime error:
+  `guanaco_raise` prints `"line:col: uncaught exception: ..."` and
+  `exit(1)`s.
 
-Not yet planned in detail: modules and exceptions.
+Not yet planned in detail: modules.
 
 ## Building
 

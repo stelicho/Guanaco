@@ -11,9 +11,11 @@
 //  single-argument constructors), arithmetic/comparison/::/@ with
 //  standard OCaml precedence, function application, tuples, list
 //  literals, records, functional record update (`{ r with f = v }`),
-//  field access, qualified `Module.name` access (e.g. `List.map`), and
-//  `type` declarations (parsed but not consulted by the evaluator -- no
-//  type checker in v1). Not yet handled: modules and exceptions.
+//  field access, qualified `Module.name` access (e.g. `List.map`),
+//  `try ... with <pattern> -> ... | ...` (same arm grammar as `match`,
+//  see parse_match_arms), and `type`/`exception` declarations (parsed
+//  but not consulted by the evaluator -- no type checker in v1).
+//  Not yet handled: modules.
 //
 
 #ifndef GUANACO_PARSER_H

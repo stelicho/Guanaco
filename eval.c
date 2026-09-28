@@ -7,6 +7,7 @@
 
 #include "motion.h"
 
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,50 @@ void runtime_error(int line, int col, const char *fmt, ...) {
     va_end(args);
     fprintf(stderr, "\n");
     exit(1);
+}
+
+/* Exceptions are implemented with setjmp/longjmp rather than by
+   threading a "did this raise?" result through every eval_expr call:
+   this is a tree-walking interpreter with no separate call-stack data
+   structure of its own, so a non-local jump back to the nearest
+   enclosing EXPR_TRY is the natural way to unwind an arbitrary depth
+   of nested eval_expr/apply_closure C frames. g_handler_stack is a
+   simple intrusive linked list of the *local* jmp_bufs living in each
+   currently-active EXPR_TRY's stack frame (see eval_expr); nested
+   try/with therefore composes correctly, since each push/pop is scoped
+   to one EXPR_TRY invocation. g_pending_exception hands the raised
+   Value across the jump -- safe to store in a plain global since
+   Guanaco is single-threaded and the value is written immediately
+   before, and read immediately after, the jump. */
+typedef struct ExceptionHandler {
+    jmp_buf buf;
+    struct ExceptionHandler *prev;
+} ExceptionHandler;
+
+static ExceptionHandler *g_handler_stack = NULL;
+static Value g_pending_exception;
+
+/* Raises exn_value as an exception. If a `try` is active, pops the
+   nearest handler and jumps back into it (see EXPR_TRY in eval_expr);
+   otherwise the exception is uncaught, so this behaves like
+   runtime_error: print a diagnostic and exit(1), since there's no
+   caller left to hand a recoverable error to. Never returns. */
+static void guanaco_raise(Value exn_value, int line, int col) {
+    if (g_handler_stack == NULL) {
+        fprintf(stderr, "%d:%d: uncaught exception: ", line, col);
+        value_print(&exn_value, stderr);
+        fprintf(stderr, "\n");
+        exit(1);
+    }
+
+    g_pending_exception = exn_value;
+    ExceptionHandler *handler = g_handler_stack;
+    /* Pop before jumping: by the time the catch arms (and, if none
+       match, a re-raise) run, this handler must already be off the
+       stack, or a re-raise from within an arm would wrongly jump back
+       into the handler that's still in the middle of handling it. */
+    g_handler_stack = handler->prev;
+    longjmp(handler->buf, 1);
 }
 
 static Value eval_let_like(const char *name, int is_rec, char **params, int param_count,
@@ -502,6 +547,32 @@ Value eval_expr(const Expr *expr, Env *env) {
             }
             runtime_error(expr->line, expr->col, "no pattern in this match matches the given value");
         }
+
+        case EXPR_TRY: {
+            ExceptionHandler handler;
+            handler.prev = g_handler_stack;
+            g_handler_stack = &handler;
+
+            if (setjmp(handler.buf) == 0) {
+                Value result = eval_expr(expr->data.as_try.body, env);
+                g_handler_stack = handler.prev; /* normal exit: pop */
+                return result;
+            }
+
+            /* Caught: guanaco_raise already popped this handler before
+               longjmp'ing here, so a raise from within an arm below
+               correctly escalates to the next enclosing handler. */
+            Value exn_value = g_pending_exception;
+            for (int i = 0; i < expr->data.as_try.arm_count; i++) {
+                Env *arm_env = env_new(env);
+                if (match_pattern(expr->data.as_try.arms[i].pattern, exn_value, arm_env)) {
+                    return eval_expr(expr->data.as_try.arms[i].body, arm_env);
+                }
+            }
+            /* No arm matched: propagate to the next enclosing handler
+               (or report uncaught) rather than swallowing it. */
+            guanaco_raise(exn_value, expr->line, expr->col);
+        }
     }
 
     runtime_error(expr->line, expr->col, "unhandled expression kind");
@@ -531,11 +602,25 @@ static Value builtin_list_iter_bare(Value arg, int line, int col) {
     return value_int(0);
 }
 
+/* `raise exn` -- exn is ordinarily a constructor value (nullary, like
+   `Not_found`, or applied to one argument, like `Invalid_arg "msg"`),
+   built by the same EXPR_CTOR/EXPR_APP machinery as any other
+   constructor; nothing about `exception` declarations is special-cased
+   here, matching this project's usual "any UIDENT already works"
+   philosophy (see ExceptionDecl's comment in ast.h). raise is an
+   ordinary global-env builtin rather than dedicated syntax, since
+   `raise expr` is just unary function application like `sin x`. */
+static Value builtin_raise(Value arg, int line, int col) {
+    guanaco_raise(arg, line, col);
+    return arg; /* unreachable: guanaco_raise never returns */
+}
+
 Env *eval_program(const Program *program) {
     Env *global = env_new(NULL);
     motion_register_builtins(global);
     env_define(global, "List.map", value_builtin("List.map", builtin_list_map_bare));
     env_define(global, "List.iter", value_builtin("List.iter", builtin_list_iter_bare));
+    env_define(global, "raise", value_builtin("raise", builtin_raise));
 
     for (int i = 0; i < program->count; i++) {
         Decl *d = &program->decls[i];

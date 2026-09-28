@@ -29,7 +29,8 @@ typedef enum {
     EXPR_FIELD,    /* expr.field */
     EXPR_CTOR,     /* a bare UIDENT reference, e.g. `Some` or `Circle`;
                       EXPR_APP is what actually applies its argument */
-    EXPR_MATCH
+    EXPR_MATCH,
+    EXPR_TRY       /* try body with pattern -> expr | ... */
 } ExprKind;
 
 typedef enum {
@@ -192,6 +193,14 @@ struct Expr {
             MatchArm *arms;  /* owned array; each arm's pattern/body owned */
             int arm_count;
         } as_match;
+
+        struct {
+            Expr *body;
+            MatchArm *arms;  /* owned array; each arm's pattern/body owned;
+                                 matched against the value raised while
+                                 evaluating body (see eval.c's EXPR_TRY) */
+            int arm_count;
+        } as_try;
     } data;
 };
 
@@ -266,11 +275,26 @@ typedef struct {
     int col;
 } TypeDecl;
 
+/* `exception Name [of type]` -- parsed for documentation only, exactly
+   like TypeDecl above: Guanaco has no type checker, so `raise`/`try`
+   don't require an exception to have been declared here first. Any
+   UIDENT already works as an exception tag the moment it's raised,
+   the same way any UIDENT already works as a constructor tag the
+   moment it's applied (see the "Status" README section). */
+typedef struct {
+    char *name;          /* owned */
+    TypeExpr *arg_type;   /* owned; NULL if nullary */
+    int line;
+    int col;
+} ExceptionDecl;
+
 typedef struct {
     Decl *decls;
     int count;
     TypeDecl *types;
     int type_count;
+    ExceptionDecl *exceptions;
+    int exception_count;
 } Program;
 
 /* Constructors. Ownership of any char* / char** / Expr* / Pattern*
@@ -296,6 +320,7 @@ Expr *expr_new_record_update(Expr *base, char **field_names, Expr **field_values
 Expr *expr_new_field(Expr *record, char *field_name, int line, int col);
 Expr *expr_new_ctor(char *name, int line, int col);
 Expr *expr_new_match(Expr *scrutinee, MatchArm *arms, int arm_count, int line, int col);
+Expr *expr_new_try(Expr *body, MatchArm *arms, int arm_count, int line, int col);
 
 Pattern *pattern_new_wildcard(int line, int col);
 Pattern *pattern_new_var(char *name, int line, int col);

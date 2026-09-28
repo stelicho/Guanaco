@@ -32,6 +32,8 @@ typedef enum {
     TOK_OF,
     TOK_MATCH,
     TOK_WITH,
+    TOK_TRY,
+    TOK_EXCEPTION,
     TOK_FUN,
     TOK_IF,
     TOK_THEN,

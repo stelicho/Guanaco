@@ -134,57 +134,57 @@ const char *value_kind_name(ValueKind kind) {
     return "?";
 }
 
-void value_print(const Value *v) {
+void value_print(const Value *v, FILE *out) {
     switch (v->kind) {
         case VAL_INT:
-            printf("%lld", v->data.as_int);
+            fprintf(out, "%lld", v->data.as_int);
             break;
         case VAL_FLOAT:
-            printf("%g", v->data.as_float);
+            fprintf(out, "%g", v->data.as_float);
             break;
         case VAL_BOOL:
-            printf("%s", v->data.as_bool ? "true" : "false");
+            fprintf(out, "%s", v->data.as_bool ? "true" : "false");
             break;
         case VAL_STRING:
-            printf("\"%s\"", v->data.as_string);
+            fprintf(out, "\"%s\"", v->data.as_string);
             break;
         case VAL_CLOSURE:
-            printf("<closure/%d>", v->data.as_closure.param_count);
+            fprintf(out, "<closure/%d>", v->data.as_closure.param_count);
             break;
         case VAL_LIST:
-            printf("[");
+            fprintf(out, "[");
             for (ConsCell *cell = v->data.as_list; cell; cell = cell->tail) {
-                value_print(&cell->head);
-                if (cell->tail) printf("; ");
+                value_print(&cell->head, out);
+                if (cell->tail) fprintf(out, "; ");
             }
-            printf("]");
+            fprintf(out, "]");
             break;
         case VAL_TUPLE:
-            printf("(");
+            fprintf(out, "(");
             for (int i = 0; i < v->data.as_tuple.count; i++) {
-                if (i > 0) printf(", ");
-                value_print(&v->data.as_tuple.items[i]);
+                if (i > 0) fprintf(out, ", ");
+                value_print(&v->data.as_tuple.items[i], out);
             }
-            printf(")");
+            fprintf(out, ")");
             break;
         case VAL_RECORD:
-            printf("{ ");
+            fprintf(out, "{ ");
             for (int i = 0; i < v->data.as_record.count; i++) {
-                if (i > 0) printf("; ");
-                printf("%s = ", v->data.as_record.field_names[i]);
-                value_print(&v->data.as_record.field_values[i]);
+                if (i > 0) fprintf(out, "; ");
+                fprintf(out, "%s = ", v->data.as_record.field_names[i]);
+                value_print(&v->data.as_record.field_values[i], out);
             }
-            printf(" }");
+            fprintf(out, " }");
             break;
         case VAL_CTOR:
-            printf("%s", v->data.as_ctor.tag);
+            fprintf(out, "%s", v->data.as_ctor.tag);
             if (v->data.as_ctor.arg) {
-                printf(" ");
-                value_print(v->data.as_ctor.arg);
+                fprintf(out, " ");
+                value_print(v->data.as_ctor.arg, out);
             }
             break;
         case VAL_BUILTIN:
-            printf("<builtin:%s>", v->data.as_builtin.name);
+            fprintf(out, "<builtin:%s>", v->data.as_builtin.name);
             break;
     }
 }

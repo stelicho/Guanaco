@@ -9,6 +9,8 @@
 #ifndef GUANACO_VALUE_H
 #define GUANACO_VALUE_H
 
+#include <stdio.h>
+
 #include "ast.h"
 
 /* Opaque here; fully defined in env.h. A Value only ever holds a pointer
@@ -112,6 +114,8 @@ Value value_ctor(char *tag, Value *arg);
 Value value_builtin(const char *name, BuiltinFn fn);
 
 const char *value_kind_name(ValueKind kind);
-void value_print(const Value *v);
+/* Writes v to out, e.g. stdout for the debug dump (main.c) or stderr
+   for an uncaught-exception diagnostic (eval.c's guanaco_raise). */
+void value_print(const Value *v, FILE *out);
 
 #endif /* GUANACO_VALUE_H */
