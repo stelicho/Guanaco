@@ -82,6 +82,14 @@ Expr *expr_new_let(char *name, int is_rec, char **params, int param_count,
     return e;
 }
 
+Expr *expr_new_let_destructure(Pattern *pattern, Expr *value, Expr *body, int line, int col) {
+    Expr *e = alloc_expr(EXPR_LET_DESTRUCTURE, line, col);
+    e->data.as_let_destructure.pattern = pattern;
+    e->data.as_let_destructure.value = value;
+    e->data.as_let_destructure.body = body;
+    return e;
+}
+
 Expr *expr_new_fun(char **params, int param_count, Expr *body, int line, int col) {
     Expr *e = alloc_expr(EXPR_FUN, line, col);
     e->data.as_fun.params = params;
@@ -113,6 +121,15 @@ Expr *expr_new_record(char **field_names, Expr **field_values, int count, int li
     e->data.as_record.field_names = field_names;
     e->data.as_record.field_values = field_values;
     e->data.as_record.count = count;
+    return e;
+}
+
+Expr *expr_new_record_update(Expr *base, char **field_names, Expr **field_values, int count, int line, int col) {
+    Expr *e = alloc_expr(EXPR_RECORD_UPDATE, line, col);
+    e->data.as_record_update.base = base;
+    e->data.as_record_update.field_names = field_names;
+    e->data.as_record_update.field_values = field_values;
+    e->data.as_record_update.count = count;
     return e;
 }
 
@@ -204,6 +221,14 @@ Pattern *pattern_new_ctor(char *name, Pattern *arg, int line, int col) {
     return p;
 }
 
+Pattern *pattern_new_record(char **field_names, Pattern **patterns, int count, int line, int col) {
+    Pattern *p = alloc_pattern(PAT_RECORD, line, col);
+    p->data.as_record.field_names = field_names;
+    p->data.as_record.patterns = patterns;
+    p->data.as_record.count = count;
+    return p;
+}
+
 void pattern_free(Pattern *pattern) {
     if (!pattern) return;
     switch (pattern->kind) {
@@ -232,6 +257,14 @@ void pattern_free(Pattern *pattern) {
         case PAT_CTOR:
             free(pattern->data.as_ctor.name);
             pattern_free(pattern->data.as_ctor.arg);
+            break;
+        case PAT_RECORD:
+            for (int i = 0; i < pattern->data.as_record.count; i++) {
+                free(pattern->data.as_record.field_names[i]);
+                pattern_free(pattern->data.as_record.patterns[i]);
+            }
+            free(pattern->data.as_record.field_names);
+            free(pattern->data.as_record.patterns);
             break;
     }
     free(pattern);
@@ -321,6 +354,11 @@ void expr_free(Expr *expr) {
             expr_free(expr->data.as_let.value);
             expr_free(expr->data.as_let.body);
             break;
+        case EXPR_LET_DESTRUCTURE:
+            pattern_free(expr->data.as_let_destructure.pattern);
+            expr_free(expr->data.as_let_destructure.value);
+            expr_free(expr->data.as_let_destructure.body);
+            break;
         case EXPR_FUN:
             free_params(expr->data.as_fun.params, expr->data.as_fun.param_count);
             expr_free(expr->data.as_fun.body);
@@ -342,6 +380,15 @@ void expr_free(Expr *expr) {
             }
             free(expr->data.as_record.field_names);
             free(expr->data.as_record.field_values);
+            break;
+        case EXPR_RECORD_UPDATE:
+            expr_free(expr->data.as_record_update.base);
+            for (int i = 0; i < expr->data.as_record_update.count; i++) {
+                free(expr->data.as_record_update.field_names[i]);
+                expr_free(expr->data.as_record_update.field_values[i]);
+            }
+            free(expr->data.as_record_update.field_names);
+            free(expr->data.as_record_update.field_values);
             break;
         case EXPR_FIELD:
             expr_free(expr->data.as_field.record);
@@ -482,6 +529,14 @@ static void print_pattern(const Pattern *pat, int indent) {
                 print_pattern(pat->data.as_ctor.arg, indent + 1);
             }
             break;
+        case PAT_RECORD:
+            printf("Record\n");
+            for (int i = 0; i < pat->data.as_record.count; i++) {
+                print_indent(indent + 1);
+                printf("%s =\n", pat->data.as_record.field_names[i]);
+                print_pattern(pat->data.as_record.patterns[i], indent + 2);
+            }
+            break;
     }
 }
 
@@ -537,6 +592,12 @@ void ast_print_expr(const Expr *expr, int indent) {
             ast_print_expr(expr->data.as_let.value, indent + 1);
             ast_print_expr(expr->data.as_let.body, indent + 1);
             break;
+        case EXPR_LET_DESTRUCTURE:
+            printf("LetDestructure\n");
+            print_pattern(expr->data.as_let_destructure.pattern, indent + 1);
+            ast_print_expr(expr->data.as_let_destructure.value, indent + 1);
+            ast_print_expr(expr->data.as_let_destructure.body, indent + 1);
+            break;
         case EXPR_FUN:
             printf("Fun params=");
             print_param_list(expr->data.as_fun.params, expr->data.as_fun.param_count);
@@ -560,6 +621,15 @@ void ast_print_expr(const Expr *expr, int indent) {
                 print_indent(indent + 1);
                 printf("%s =\n", expr->data.as_record.field_names[i]);
                 ast_print_expr(expr->data.as_record.field_values[i], indent + 2);
+            }
+            break;
+        case EXPR_RECORD_UPDATE:
+            printf("RecordUpdate\n");
+            ast_print_expr(expr->data.as_record_update.base, indent + 1);
+            for (int i = 0; i < expr->data.as_record_update.count; i++) {
+                print_indent(indent + 1);
+                printf("%s =\n", expr->data.as_record_update.field_names[i]);
+                ast_print_expr(expr->data.as_record_update.field_values[i], indent + 2);
             }
             break;
         case EXPR_FIELD:

@@ -78,7 +78,8 @@ anywhere near the machine.
 - Algebraic data types via `type ... = A of ... | B of ...`
 - `match` expressions with pattern matching (including on the built-in
   motion constructors)
-- Records, tuples, lists (`::`, `@`, `List.map`, `List.iter`, ...)
+- Records (including functional update and destructuring patterns),
+  tuples, lists (`::`, `@`, `List.map`, `List.iter`, ...)
 - Numeric primitives (`+.`, `-.`, `*.`, `/.`, `sin`, `cos`, `sqrt`, ...) so
   paths like helices, involute gears, or spirals can be computed rather
   than hand-plotted
@@ -161,8 +162,30 @@ Done:
     multi-field constructors bundle their args as a tuple, same as
     OCaml).
   - `match` with patterns: wildcard `_`, variables, int/float/bool/string
-    literals, `[]`/`::`, tuples, and constructors (nullary or with one
-    nested pattern). Record patterns and or-patterns aren't supported.
+    literals, `[]`/`::`, tuples, constructors (nullary or with one nested
+    pattern), and records (`{ x = pat; y }` — `y` alone is sugar for
+    `y = y`, matching OCaml's field-shorthand). Record patterns may omit
+    fields; only the ones listed are checked, since there's no type
+    checker to enforce exhaustiveness against. Or-patterns aren't
+    supported.
+  - `let <pattern> = value in body` destructuring for tuple/record
+    patterns (e.g. `let (a, b) = pair in ...`, `let { x; y } = p in
+    ...`), reusing the same pattern grammar as `match`. Only the
+    `let ... in` expression form supports this — top-level `let` and
+    `let rec` still require a plain name, since the former needs one to
+    bind into the global `Env` and the latter to tie the recursive
+    closure.
+  - Functional record update, `{ r with field = expr; ... }`, producing
+    a new record that copies every field of `r` except the ones
+    overridden. Disambiguated from a plain record literal by a
+    speculative parse (see `parse_record_literal`'s comment) rather than
+    extra lookahead machinery.
+  - Qualified `Module.name` access (e.g. `List.map`) is now a single
+    lexer/parser-level identifier — see `parse_postfix`'s comment. There's
+    no real module system: this is purely syntactic, and only two such
+    names carry any meaning (see the `List.map`/`List.iter` bullet
+    below). Any other `Foo.bar` is simply an identifier that's unbound
+    unless something else defines it.
   - Parse errors are reported with line/col and the parser resynchronizes
     at the next top-level `let`/`type` so later decls still get parsed.
 - `Value` representation, `Env` (persistent linked scopes), and a
@@ -209,11 +232,21 @@ Done:
   example (with one adjustment — see `main.c`'s comment on `kRingSample`:
   its `Linear` now carries a feedrate to match `Linear of point * float`,
   since the intro snippet above omits one for brevity).
+- `List.map`/`List.iter`, callable via the qualified-identifier syntax
+  above (e.g. `List.map (fun x -> x * 2) xs`). These aren't registered
+  as ordinary curried values — `eval_expr`'s `EXPR_APP` case recognizes
+  the fully-applied two-argument AST shape `App(App(Ident "List.map", fn),
+  list)` structurally and evaluates it directly, since every other
+  builtin in this language is unary (see `value.h`'s `BuiltinFn`).
+  Consequently `List.map`/`List.iter` must be applied to both arguments
+  at once — `List.map f` on its own (meant to be applied later) reports
+  a diagnostic explaining the restriction rather than silently failing
+  as an unbound variable. `List.iter`'s only real use today is forcing
+  evaluation across every element of a list (e.g. so `fn` can raise a
+  runtime error on an invalid one), since Guanaco has neither mutation
+  nor I/O builtins for it to produce a visible side effect with yet.
 
-Not yet planned in detail: `let`-pattern destructuring, record patterns,
-record-update syntax (`{ r with x = 1 }`), modules, exceptions, and
-`List.map`/`List.iter`/qualified `Module.name` access (mentioned in
-"Language" above but not yet supported by the lexer/parser).
+Not yet planned in detail: modules and exceptions.
 
 ## Building
 

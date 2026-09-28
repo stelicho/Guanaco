@@ -4,14 +4,16 @@
 //
 //  Recursive-descent parser: tokens -> AST.
 //
-//  v1 subset (see README "Status"): let / let rec bindings, if/then/else,
-//  fun, match with patterns (literals, wildcard, variables, ::  / [],
-//  tuples, and single-argument constructors), arithmetic/comparison/::/@
-//  with standard OCaml precedence, function application, tuples, list
-//  literals, records, field access, and `type` declarations (parsed but
-//  not consulted by the evaluator -- no type checker in v1). Not yet
-//  handled: modules, exceptions, `let`-pattern destructuring, record
-//  patterns, and the `with` record-update syntax.
+//  v1 subset (see README "Status"): let / let rec bindings, `let
+//  <pattern> = value in body` destructuring (parens/braces patterns
+//  only -- see parse_let), if/then/else, fun, match with patterns
+//  (literals, wildcard, variables, ::  / [], tuples, records, and
+//  single-argument constructors), arithmetic/comparison/::/@ with
+//  standard OCaml precedence, function application, tuples, list
+//  literals, records, functional record update (`{ r with f = v }`),
+//  field access, qualified `Module.name` access (e.g. `List.map`), and
+//  `type` declarations (parsed but not consulted by the evaluator -- no
+//  type checker in v1). Not yet handled: modules and exceptions.
 //
 
 #ifndef GUANACO_PARSER_H

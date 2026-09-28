@@ -60,6 +60,60 @@ static Value apply_closure(Value closure, Value arg) {
     return value_closure(params + 1, param_count - 1, closure.data.as_closure.body, call_env);
 }
 
+/* Shared by ordinary function application (EXPR_APP below) and by the
+   List.map/List.iter loop, which both need to call an arbitrary callee
+   value on a single argument. */
+static Value apply_value(Value callee, Value arg, int line, int col) {
+    if (callee.kind == VAL_CTOR) {
+        if (callee.data.as_ctor.arg != NULL) {
+            runtime_error(line, col,
+                          "constructor '%s' does not take more than one argument",
+                          callee.data.as_ctor.tag);
+        }
+        Value *heap_arg = malloc(sizeof(Value));
+        *heap_arg = arg;
+        return value_ctor(callee.data.as_ctor.tag, heap_arg);
+    }
+
+    if (callee.kind == VAL_BUILTIN) {
+        return callee.data.as_builtin.fn(arg, line, col);
+    }
+
+    if (callee.kind != VAL_CLOSURE) {
+        runtime_error(line, col, "cannot call a value of kind '%s'", value_kind_name(callee.kind));
+    }
+
+    return apply_closure(callee, arg);
+}
+
+/* `List.map`/`List.iter`, recognized structurally in EXPR_APP as
+   App(App(Ident "List.map"|"List.iter", fn), list) -- see the comment
+   there for why this is handled as a special AST shape instead of a
+   registered curried Value (this language's builtins are otherwise all
+   unary; see value.h). is_map selects between building a new list of
+   results (List.map) and just calling fn for effect while discarding
+   the results (List.iter, whose only real use is forcing evaluation
+   across every element -- e.g. to have fn raise a runtime error on any
+   invalid one -- since Guanaco has neither mutation nor I/O builtins). */
+static Value eval_list_map_or_iter(Value fn, Value list_value, int is_map, int line, int col) {
+    ConsCell *cell = list_value.data.as_list;
+    if (!is_map) {
+        while (cell) {
+            apply_value(fn, cell->head, line, col);
+            cell = cell->tail;
+        }
+        return value_nil();
+    }
+
+    if (!cell) return value_nil();
+    Value mapped_head = apply_value(fn, cell->head, line, col);
+    Value rest;
+    rest.kind = VAL_LIST;
+    rest.data.as_list = cell->tail;
+    Value mapped_tail = eval_list_map_or_iter(fn, rest, 1, line, col);
+    return value_cons(mapped_head, mapped_tail);
+}
+
 static Value eval_unary(const Expr *expr, Env *env) {
     UnaryOp op = expr->data.as_unary.op;
     Value operand = eval_expr(expr->data.as_unary.operand, env);
@@ -280,6 +334,16 @@ static int match_pattern(const Pattern *pat, Value value, Env *bind_env) {
             if (!pat->data.as_ctor.arg) return value.data.as_ctor.arg == NULL;
             if (!value.data.as_ctor.arg) return 0;
             return match_pattern(pat->data.as_ctor.arg, *value.data.as_ctor.arg, bind_env);
+
+        case PAT_RECORD: {
+            if (value.kind != VAL_RECORD) return 0;
+            for (int i = 0; i < pat->data.as_record.count; i++) {
+                Value field_value;
+                if (!value_record_get(value, pat->data.as_record.field_names[i], &field_value)) return 0;
+                if (!match_pattern(pat->data.as_record.patterns[i], field_value, bind_env)) return 0;
+            }
+            return 1;
+        }
     }
     return 0;
 }
@@ -324,35 +388,45 @@ Value eval_expr(const Expr *expr, Env *env) {
                                   expr->data.as_let.value, expr->data.as_let.body,
                                   env, expr->line, expr->col);
 
+        case EXPR_LET_DESTRUCTURE: {
+            Value bound = eval_expr(expr->data.as_let_destructure.value, env);
+            Env *bind_env = env_new(env);
+            if (!match_pattern(expr->data.as_let_destructure.pattern, bound, bind_env)) {
+                runtime_error(expr->line, expr->col, "let-pattern did not match the bound value");
+            }
+            return eval_expr(expr->data.as_let_destructure.body, bind_env);
+        }
+
         case EXPR_FUN:
             return value_closure(expr->data.as_fun.params, expr->data.as_fun.param_count,
                                   expr->data.as_fun.body, env);
 
         case EXPR_APP: {
-            Value callee = eval_expr(expr->data.as_app.callee, env);
-
-            if (callee.kind == VAL_CTOR) {
-                if (callee.data.as_ctor.arg != NULL) {
-                    runtime_error(expr->line, expr->col,
-                                  "constructor '%s' does not take more than one argument",
-                                  callee.data.as_ctor.tag);
+            /* Special-case the fully-applied shape
+               App(App(Ident "List.map"|"List.iter", fn), list) before
+               falling back to ordinary application -- see
+               eval_list_map_or_iter's comment for why these two names
+               are handled structurally instead of as registered Values. */
+            const Expr *inner_app = expr->data.as_app.callee;
+            if (inner_app->kind == EXPR_APP && inner_app->data.as_app.callee->kind == EXPR_IDENT) {
+                const char *name = inner_app->data.as_app.callee->data.as_ident;
+                int is_map = strcmp(name, "List.map") == 0;
+                int is_iter = !is_map && strcmp(name, "List.iter") == 0;
+                if (is_map || is_iter) {
+                    Value fn = eval_expr(inner_app->data.as_app.arg, env);
+                    Value list = eval_expr(expr->data.as_app.arg, env);
+                    if (list.kind != VAL_LIST) {
+                        runtime_error(expr->line, expr->col,
+                                      "'%s' expects a list as its second argument, got %s",
+                                      name, value_kind_name(list.kind));
+                    }
+                    return eval_list_map_or_iter(fn, list, is_map, expr->line, expr->col);
                 }
-                Value *heap_arg = malloc(sizeof(Value));
-                *heap_arg = eval_expr(expr->data.as_app.arg, env);
-                return value_ctor(callee.data.as_ctor.tag, heap_arg);
             }
 
-            if (callee.kind == VAL_BUILTIN) {
-                Value arg = eval_expr(expr->data.as_app.arg, env);
-                return callee.data.as_builtin.fn(arg, expr->line, expr->col);
-            }
-
-            if (callee.kind != VAL_CLOSURE) {
-                runtime_error(expr->line, expr->col, "cannot call a value of kind '%s'", value_kind_name(callee.kind));
-            }
-
+            Value callee = eval_expr(expr->data.as_app.callee, env);
             Value arg = eval_expr(expr->data.as_app.arg, env);
-            return apply_closure(callee, arg);
+            return apply_value(callee, arg, expr->line, expr->col);
         }
 
         case EXPR_TUPLE: {
@@ -373,6 +447,36 @@ Value eval_expr(const Expr *expr, Env *env) {
             /* field_names is borrowed directly from the AST (which
                outlives evaluation -- see README's memory strategy). */
             return value_record(expr->data.as_record.field_names, values, count);
+        }
+
+        case EXPR_RECORD_UPDATE: {
+            Value base = eval_expr(expr->data.as_record_update.base, env);
+            if (base.kind != VAL_RECORD) {
+                runtime_error(expr->line, expr->col, "record update expects a record, got %s",
+                              value_kind_name(base.kind));
+            }
+            int count = base.data.as_record.count;
+            char **names = malloc(sizeof(char *) * (size_t)count);
+            Value *values = malloc(sizeof(Value) * (size_t)count);
+            for (int i = 0; i < count; i++) {
+                names[i] = base.data.as_record.field_names[i];
+                values[i] = base.data.as_record.field_values[i];
+            }
+            for (int i = 0; i < expr->data.as_record_update.count; i++) {
+                const char *field_name = expr->data.as_record_update.field_names[i];
+                int found = 0;
+                for (int j = 0; j < count; j++) {
+                    if (strcmp(names[j], field_name) == 0) {
+                        values[j] = eval_expr(expr->data.as_record_update.field_values[i], env);
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) {
+                    runtime_error(expr->line, expr->col, "record has no field '%s'", field_name);
+                }
+            }
+            return value_record(names, values, count);
         }
 
         case EXPR_FIELD: {
@@ -404,9 +508,34 @@ Value eval_expr(const Expr *expr, Env *env) {
     return value_int(0);
 }
 
+/* `List.map`/`List.iter` only work fully applied in one shot (see
+   eval_list_map_or_iter) since this evaluator special-cases their AST
+   shape rather than supporting curried native functions. Referencing
+   either name without immediately applying both arguments (e.g.
+   `List.map f`, meant to be applied later) would otherwise fail with a
+   plain "unbound variable" error; registering these placeholders gives
+   a diagnostic that actually explains the restriction. */
+static Value builtin_list_map_bare(Value arg, int line, int col) {
+    (void)arg;
+    runtime_error(line, col,
+                  "'List.map' must be applied to both its function and list arguments at once, "
+                  "e.g. 'List.map f xs' -- partial application isn't supported");
+    return value_int(0);
+}
+
+static Value builtin_list_iter_bare(Value arg, int line, int col) {
+    (void)arg;
+    runtime_error(line, col,
+                  "'List.iter' must be applied to both its function and list arguments at once, "
+                  "e.g. 'List.iter f xs' -- partial application isn't supported");
+    return value_int(0);
+}
+
 Env *eval_program(const Program *program) {
     Env *global = env_new(NULL);
     motion_register_builtins(global);
+    env_define(global, "List.map", value_builtin("List.map", builtin_list_map_bare));
+    env_define(global, "List.iter", value_builtin("List.iter", builtin_list_iter_bare));
 
     for (int i = 0; i < program->count; i++) {
         Decl *d = &program->decls[i];

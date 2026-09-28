@@ -19,11 +19,13 @@ typedef enum {
     EXPR_BINARY,
     EXPR_IF,
     EXPR_LET,
+    EXPR_LET_DESTRUCTURE, /* let <pattern> = value in body */
     EXPR_FUN,
     EXPR_APP,
     EXPR_TUPLE,
     EXPR_NIL,      /* [] */
     EXPR_RECORD,   /* { field = expr; ... } */
+    EXPR_RECORD_UPDATE, /* { base with field = expr; ... } */
     EXPR_FIELD,    /* expr.field */
     EXPR_CTOR,     /* a bare UIDENT reference, e.g. `Some` or `Circle`;
                       EXPR_APP is what actually applies its argument */
@@ -59,7 +61,9 @@ typedef enum {
     PAT_NIL,       /* [] */
     PAT_CONS,      /* p1 :: p2 */
     PAT_TUPLE,     /* (p1, p2, ...) */
-    PAT_CTOR       /* UIDENT [pattern] -- nullary or single-argument */
+    PAT_CTOR,      /* UIDENT [pattern] -- nullary or single-argument */
+    PAT_RECORD     /* { field [= pattern]; ... } -- may omit fields; only
+                      the listed fields are checked (see match_pattern) */
 } PatternKind;
 
 typedef struct Pattern Pattern;
@@ -89,6 +93,12 @@ struct Pattern {
             char *name;    /* owned */
             Pattern *arg;  /* owned; NULL if nullary */
         } as_ctor;
+
+        struct {
+            char **field_names;  /* owned array of owned strings */
+            Pattern **patterns;  /* owned array of owned Pattern* */
+            int count;
+        } as_record;
     } data;
 };
 
@@ -138,6 +148,12 @@ struct Expr {
         } as_let;
 
         struct {
+            Pattern *pattern;  /* owned */
+            Expr *value;
+            Expr *body;
+        } as_let_destructure;
+
+        struct {
             char **params;     /* owned array of owned strings */
             int param_count;
             Expr *body;
@@ -158,6 +174,13 @@ struct Expr {
             Expr **field_values;  /* owned array of owned Expr* */
             int count;
         } as_record;
+
+        struct {
+            Expr *base;            /* owned; the record being updated */
+            char **field_names;   /* owned array of owned strings */
+            Expr **field_values;  /* owned array of owned Expr* */
+            int count;
+        } as_record_update;
 
         struct {
             Expr *record;
@@ -263,11 +286,13 @@ Expr *expr_new_binary(BinaryOp op, Expr *left, Expr *right, int line, int col);
 Expr *expr_new_if(Expr *cond, Expr *then_branch, Expr *else_branch, int line, int col);
 Expr *expr_new_let(char *name, int is_rec, char **params, int param_count,
                     Expr *value, Expr *body, int line, int col);
+Expr *expr_new_let_destructure(Pattern *pattern, Expr *value, Expr *body, int line, int col);
 Expr *expr_new_fun(char **params, int param_count, Expr *body, int line, int col);
 Expr *expr_new_app(Expr *callee, Expr *arg, int line, int col);
 Expr *expr_new_tuple(Expr **items, int count, int line, int col);
 Expr *expr_new_nil(int line, int col);
 Expr *expr_new_record(char **field_names, Expr **field_values, int count, int line, int col);
+Expr *expr_new_record_update(Expr *base, char **field_names, Expr **field_values, int count, int line, int col);
 Expr *expr_new_field(Expr *record, char *field_name, int line, int col);
 Expr *expr_new_ctor(char *name, int line, int col);
 Expr *expr_new_match(Expr *scrutinee, MatchArm *arms, int arm_count, int line, int col);
@@ -282,6 +307,7 @@ Pattern *pattern_new_nil(int line, int col);
 Pattern *pattern_new_cons(Pattern *head, Pattern *tail, int line, int col);
 Pattern *pattern_new_tuple(Pattern **items, int count, int line, int col);
 Pattern *pattern_new_ctor(char *name, Pattern *arg, int line, int col);
+Pattern *pattern_new_record(char **field_names, Pattern **patterns, int count, int line, int col);
 void pattern_free(Pattern *pattern);
 
 TypeExpr *type_expr_new_name(char *name);

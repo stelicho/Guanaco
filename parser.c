@@ -130,6 +130,7 @@ static int starts_pattern_atom(TokenKind kind) {
         case TOK_LIDENT:
         case TOK_UIDENT:
         case TOK_LPAREN:
+        case TOK_LBRACE:
         case TOK_LBRACKET:
             return 1;
         default:
@@ -161,12 +162,32 @@ static char **parse_param_list(Parser *p, int *out_count) {
 /* ==================== Expressions ==================== */
 
 static Expr *parse_expr(Parser *p);
+static Expr *parse_application(Parser *p);
 static Pattern *parse_pattern(Parser *p);
+
+/* `let <pattern> = value in body`, where <pattern> is a parenthesized or
+   record pattern (e.g. `let (a, b) = ... in ...`, `let { x; y } = ...
+   in ...`). Only reachable when the token right after 'let' isn't a
+   plain name -- see parse_let, which still handles `let name param* =
+   ...` (including the `rec` case, which needs a name to tie the
+   recursive binding and so keeps that form only). */
+static Expr *parse_let_destructure(Parser *p, int line, int col) {
+    Pattern *pattern = parse_pattern(p);
+    consume(p, TOK_EQ, "expected '=' in let binding");
+    Expr *value = parse_expr(p);
+    consume(p, TOK_IN, "expected 'in' after let binding");
+    Expr *body = parse_expr(p);
+    return expr_new_let_destructure(pattern, value, body, line, col);
+}
 
 static Expr *parse_let(Parser *p) {
     int line = p->current.line, col = p->current.col;
     consume(p, TOK_LET, "expected 'let'");
     int is_rec = match(p, TOK_REC);
+
+    if (!is_rec && (check(p, TOK_LPAREN) || check(p, TOK_LBRACE))) {
+        return parse_let_destructure(p, line, col);
+    }
 
     if (!check(p, TOK_LIDENT)) {
         error_at(p, &p->current, "expected a name after 'let'");
@@ -237,13 +258,67 @@ static Expr *parse_match(Parser *p) {
     return expr_new_match(scrutinee, arms, count, line, col);
 }
 
-/* { field = expr; field = expr; ... } -- opening '{' already current. */
+/* { field = expr; field = expr; ... } or { base with field = expr; ... }
+   (functional record update) -- opening '{' already current.
+
+   The two forms are disambiguated by speculatively parsing an
+   application-level expression and checking whether 'with' follows; if
+   not, the parser position is rewound (a shallow struct copy is safe
+   here since Parser holds its Lexer by value and every Token only
+   borrows into the source buffer) and normal field-list parsing resumes
+   from the same point. The speculative parse never fails on a
+   well-formed field list: a lone field name like `x` in `{ x = 1.0 }`
+   is itself a valid application-level expression (just an identifier),
+   so it parses cleanly and simply isn't followed by 'with'. */
 static Expr *parse_record_literal(Parser *p) {
     int line = p->current.line, col = p->current.col;
     consume(p, TOK_LBRACE, "expected '{'");
 
     if (match(p, TOK_RBRACE)) {
         return expr_new_record(NULL, NULL, 0, line, col);
+    }
+
+    if (starts_primary(p->current.kind)) {
+        Parser saved = *p;
+        Expr *base = parse_application(p);
+        if (check(p, TOK_WITH)) {
+            advance(p); /* 'with' */
+
+            int capacity = 4, count = 0;
+            char **names = malloc(sizeof(char *) * (size_t)capacity);
+            Expr **values = malloc(sizeof(Expr *) * (size_t)capacity);
+
+            for (;;) {
+                if (!check(p, TOK_LIDENT)) {
+                    error_at(p, &p->current, "expected a field name");
+                    break;
+                }
+                char *name = dup_lexeme(p->current.lexeme, p->current.length);
+                advance(p);
+                consume(p, TOK_EQ, "expected '=' after field name");
+                Expr *value = parse_expr(p);
+
+                if (count == capacity) {
+                    capacity *= 2;
+                    names = realloc(names, sizeof(char *) * (size_t)capacity);
+                    values = realloc(values, sizeof(Expr *) * (size_t)capacity);
+                }
+                names[count] = name;
+                values[count] = value;
+                count++;
+
+                if (!match(p, TOK_SEMI)) break;
+                if (check(p, TOK_RBRACE)) break; /* trailing ';' allowed */
+            }
+
+            consume(p, TOK_RBRACE, "expected '}'");
+            return expr_new_record_update(base, names, values, count, line, col);
+        }
+
+        /* Not a record update -- rewind and fall through to plain
+           field-list parsing below. */
+        expr_free(base);
+        *p = saved;
     }
 
     int capacity = 4, count = 0;
@@ -356,9 +431,38 @@ static Expr *parse_primary(Parser *p) {
 }
 
 /* `.field` binds tighter than function application in OCaml, so it's
-   handled as a postfix wrapper directly around primaries. */
+   handled as a postfix wrapper directly around primaries.
+
+   A leading `UIDENT.lident` is special-cased here into a single
+   qualified identifier (e.g. `List.map` becomes one EXPR_IDENT whose
+   name is the literal string "List.map") rather than field access on a
+   constructor -- there's no module system, so this is purely a name
+   made of two lexer tokens. Only the constructor's very first dot
+   qualifies; eval.c gives specific meaning to a couple of these names
+   (see its EXPR_APP handling) and any other qualified name is simply an
+   identifier that's unbound unless something else defines it. */
 static Expr *parse_postfix(Parser *p) {
     Expr *expr = parse_primary(p);
+
+    if (expr->kind == EXPR_CTOR && check(p, TOK_DOT)) {
+        int line = expr->line, col = expr->col;
+        advance(p); /* '.' */
+        if (!check(p, TOK_LIDENT)) {
+            error_at(p, &p->current, "expected a name after '.'");
+        } else {
+            size_t mod_len = strlen(expr->data.as_ctor_name);
+            size_t field_len = (size_t)p->current.length;
+            char *qualified = malloc(mod_len + 1 + field_len + 1);
+            memcpy(qualified, expr->data.as_ctor_name, mod_len);
+            qualified[mod_len] = '.';
+            memcpy(qualified + mod_len + 1, p->current.lexeme, field_len);
+            qualified[mod_len + 1 + field_len] = '\0';
+            advance(p);
+            expr_free(expr);
+            expr = expr_new_ident(qualified, line, col);
+        }
+    }
+
     while (check(p, TOK_DOT)) {
         int line = p->current.line, col = p->current.col;
         advance(p);
@@ -559,6 +663,61 @@ static Pattern *parse_ctor_pattern(Parser *p) {
     return pattern_new_ctor(name, arg, line, col);
 }
 
+/* { field [= pattern]; field [= pattern]; ... } -- opening '{' already
+   current. Unlike real OCaml, listed fields need not cover every field
+   of the matched record: only the fields named here are checked (see
+   match_pattern in eval.c), matching this project's general stance of
+   not type-checking/exhaustiveness-checking records (there's no static
+   type for a record to check against in the first place -- see
+   README's notes on EXPR_RECORD being "self-describing at its use
+   site"). A field without `= pattern` is shorthand for binding it to a
+   variable of the same name, matching OCaml's `{ x; y }` sugar for
+   `{ x = x; y = y }`. */
+static Pattern *parse_record_pattern(Parser *p) {
+    int line = p->current.line, col = p->current.col;
+    consume(p, TOK_LBRACE, "expected '{'");
+
+    if (match(p, TOK_RBRACE)) {
+        return pattern_new_record(NULL, NULL, 0, line, col);
+    }
+
+    int capacity = 4, count = 0;
+    char **names = malloc(sizeof(char *) * (size_t)capacity);
+    Pattern **patterns = malloc(sizeof(Pattern *) * (size_t)capacity);
+
+    for (;;) {
+        if (!check(p, TOK_LIDENT)) {
+            error_at(p, &p->current, "expected a field name");
+            break;
+        }
+        int field_line = p->current.line, field_col = p->current.col;
+        char *name = dup_lexeme(p->current.lexeme, p->current.length);
+        advance(p);
+
+        Pattern *pat;
+        if (match(p, TOK_EQ)) {
+            pat = parse_pattern(p);
+        } else {
+            pat = pattern_new_var(dup_lexeme(name, (int)strlen(name)), field_line, field_col);
+        }
+
+        if (count == capacity) {
+            capacity *= 2;
+            names = realloc(names, sizeof(char *) * (size_t)capacity);
+            patterns = realloc(patterns, sizeof(Pattern *) * (size_t)capacity);
+        }
+        names[count] = name;
+        patterns[count] = pat;
+        count++;
+
+        if (!match(p, TOK_SEMI)) break;
+        if (check(p, TOK_RBRACE)) break; /* trailing ';' allowed */
+    }
+
+    consume(p, TOK_RBRACE, "expected '}'");
+    return pattern_new_record(names, patterns, count, line, col);
+}
+
 static Pattern *parse_atomic_pattern(Parser *p) {
     int line = p->current.line, col = p->current.col;
 
@@ -575,6 +734,9 @@ static Pattern *parse_atomic_pattern(Parser *p) {
     }
     if (check(p, TOK_UIDENT)) {
         return parse_ctor_pattern(p);
+    }
+    if (check(p, TOK_LBRACE)) {
+        return parse_record_pattern(p);
     }
     if (match(p, TOK_LBRACKET)) {
         if (match(p, TOK_RBRACKET)) return pattern_new_nil(line, col);
